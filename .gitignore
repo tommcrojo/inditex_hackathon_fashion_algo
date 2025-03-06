@@ -1,0 +1,23 @@
+# Archivos de datos
+data/raw/*.csv
+data/raw/*.pkl
+data/raw/*.zip
+data/raw/*.gz
+
+# Modelos entrenados
+models/*.pt
+models/*.pth
+models/*.h5
+models/*.pkl
+
+# Archivos temporales
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv
+venv/
+ENV/
+env/
