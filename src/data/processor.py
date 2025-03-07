@@ -1,10 +1,12 @@
+"""
+Feature processing components for recommender system
+"""
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics.pairwise import cosine_similarity
 from collections import defaultdict
-import datetime
+
 
 class FeatureProcessor:
     """Enhanced feature processor for recommendation data"""
@@ -83,8 +85,9 @@ class FeatureProcessor:
         df['avg_interaction_time'] = df['avg_interaction_time'].fillna(0)
         
         # Flag if user added anything to cart in this session
-        cart_sessions = df[df['add_to_cart'] == 1]['session_id'].unique()
-        df['has_cart_addition'] = df['session_id'].isin(cart_sessions).astype(int)
+        if 'add_to_cart' in df.columns:
+            cart_sessions = df[df['add_to_cart'] == 1]['session_id'].unique()
+            df['has_cart_addition'] = df['session_id'].isin(cart_sessions).astype(int)
         
         return df
     

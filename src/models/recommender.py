@@ -1,3 +1,9 @@
+"""
+Recommender system implementations including collaborative, content-based, 
+contextual, and hybrid recommendation approaches
+"""
+import os
+import time
 import pandas as pd
 import numpy as np
 import torch
@@ -8,15 +14,115 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional, Any
-import os
-import time
-import pickle
-import json
-import warnings
-warnings.filterwarnings('ignore')
 
-# Importar FeatureProcessor desde el módulo processor
-from data.processor import FeatureProcessor
+
+class RecommendationDataset(Dataset):
+    """Dataset for training recommendation models"""
+    
+    def __init__(self, interactions, user_mapping, product_mapping, include_features=False, products_df=None):
+        self.interactions = interactions
+        self.user_mapping = user_mapping
+        self.product_mapping = product_mapping
+        self.include_features = include_features
+        self.products_df = products_df
+        
+        # Prepare additional features if requested
+        if self.include_features and self.products_df is not None:
+            # Create features for each product
+            self.product_features = {}
+            for _, row in self.products_df.iterrows():
+                product_id = row['partnumber']
+                # Simple features: discount (0/1), family and section
+                features = [
+                    int(row.get('discount', False)),
+                ]
+                # Add family if exists
+                if 'familiy' in row:
+                    features.append(row['familiy'] / 1000)  # Normalize
+                elif 'family' in row:
+                    features.append(row['family'] / 1000)  # Normalize
+                else:
+                    features.append(0)
+                
+                # Add section if exists
+                if 'cod_section' in row:
+                    features.append(row['cod_section'] / 100)  # Normalize
+                else:
+                    features.append(0)
+                
+                self.product_features[product_id] = torch.tensor(features, dtype=torch.float)
+    
+    def __len__(self):
+        return len(self.interactions)
+    
+    def __getitem__(self, idx):
+        user_id = self.interactions.iloc[idx]['user_id']
+        product_id = self.interactions.iloc[idx]['partnumber']
+        label = float(self.interactions.iloc[idx]['add_to_cart'])
+        
+        # Convert to tensor indices
+        user_idx = self.user_mapping.get(user_id, 0)  # 0 for unknown users
+        product_idx = self.product_mapping.get(product_id, 0)  # 0 for unknown products
+        
+        if self.include_features and self.products_df is not None and product_id in self.product_features:
+            prod_features = self.product_features[product_id]
+            return {
+                'user_idx': torch.tensor(user_idx, dtype=torch.long),
+                'product_idx': torch.tensor(product_idx, dtype=torch.long),
+                'product_features': prod_features,
+                'label': torch.tensor(label, dtype=torch.float)
+            }
+        else:
+            return {
+                'user_idx': torch.tensor(user_idx, dtype=torch.long),
+                'product_idx': torch.tensor(product_idx, dtype=torch.long),
+                'label': torch.tensor(label, dtype=torch.float)
+            }
+
+
+class ProductEmbeddingModel(nn.Module):
+    """Neural network model for collaborative filtering with product features"""
+    
+    def __init__(self, num_users, num_products, embedding_dim=64, feature_dim=3, hidden_dims=[128, 64]):
+        super(ProductEmbeddingModel, self).__init__()
+        # Embedding layers
+        self.user_embedding = nn.Embedding(num_users + 1, embedding_dim)  # +1 for unknown user
+        self.product_embedding = nn.Embedding(num_products + 1, embedding_dim)  # +1 for unknown product
+        
+        # Combined input: user embedding + product embedding + product features
+        combined_dim = embedding_dim * 2 + feature_dim
+        
+        # Prediction layers
+        layers = []
+        prev_dim = combined_dim
+        
+        for dim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, dim))
+            layers.append(nn.ReLU())
+            layers.append(nn.BatchNorm1d(dim))
+            layers.append(nn.Dropout(0.2))
+            prev_dim = dim
+        
+        layers.append(nn.Linear(prev_dim, 1))
+        layers.append(nn.Sigmoid())
+        
+        self.fc_layers = nn.Sequential(*layers)
+    
+    def forward(self, user_idx, product_idx, product_features=None):
+        # Get embeddings
+        user_embeds = self.user_embedding(user_idx)
+        product_embeds = self.product_embedding(product_idx)
+        
+        # Concatenate embeddings and features if available
+        if product_features is not None:
+            concat_embeds = torch.cat([user_embeds, product_embeds, product_features], dim=1)
+        else:
+            concat_embeds = torch.cat([user_embeds, product_embeds], dim=1)
+        
+        # Generate prediction
+        output = self.fc_layers(concat_embeds)
+        return output.squeeze()
+
 
 class CollaborativeFilteringModel:
     """Collaborative filtering model with temporal decay"""
@@ -404,7 +510,7 @@ class ContentBasedRecommender:
             sorted_products = filtered_products
         
         return sorted_products['partnumber'].head(n).tolist()
-    
+
 
 class ContextualRecommender:
     """Context-aware recommender that considers session, device, and time"""
@@ -499,9 +605,6 @@ class HybridRecommender:
         self.content_model = ContentBasedRecommender()
         self.context_model = ContextualRecommender()
         
-        # Feature processor
-        self.feature_processor = FeatureProcessor()
-        
         # Data
         self.train_df = None
         self.products_df = None
@@ -522,6 +625,7 @@ class HybridRecommender:
         
         # Load products data
         if products_path:
+            import pickle
             with open(products_path, 'rb') as f:
                 self.products_df = pickle.load(f)
             print(f"Products data loaded: {self.products_df.shape}")
@@ -531,12 +635,12 @@ class HybridRecommender:
             self.test_df = pd.read_csv(test_path)
             print(f"Test data loaded: {self.test_df.shape}")
     
-    def process_features(self):
-        """Process all features"""
+    def process_features(self, feature_processor):
+        """Process all features using the provided feature processor"""
         if self.train_df is None or self.products_df is None:
             raise ValueError("Data must be loaded before processing features")
         
-        self.features = self.feature_processor.prepare_all_features(
+        self.features = feature_processor.prepare_all_features(
             self.train_df, self.products_df
         )
         
@@ -549,7 +653,7 @@ class HybridRecommender:
     def train_models(self, train_cf=True):
         """Train all component models"""
         if self.features is None:
-            self.process_features()
+            raise ValueError("Features must be processed before training models")
         
         if train_cf:
             print("Training collaborative filtering model...")
@@ -763,6 +867,7 @@ class HybridRecommender:
                         predictions[str(session_id)] = list(self.products_df['partnumber'].head(5))
         
         # Save predictions to file
+        import json
         with open(output_path, 'w') as f:
             json.dump(predictions, f, indent=2)
         
@@ -784,7 +889,7 @@ class HybridRecommender:
             return pd.DataFrame()
         
         # Select random sample
-        np.random.seed(15)  # For reproducibility
+        np.random.seed(42)  # For reproducibility
         selected_sessions = np.random.choice(cart_sessions, min(n_samples, len(cart_sessions)), replace=False)
         
         results = []
@@ -851,111 +956,3 @@ class HybridRecommender:
         
         metrics['ndcg@5'] = np.mean(ndcg_scores) if ndcg_scores else 0
         return metrics
-
-
-class RecommendationDataset(Dataset):
-    """Dataset for training recommendation models"""
-    
-    def __init__(self, interactions, user_mapping, product_mapping, include_features=False, products_df=None):
-        self.interactions = interactions
-        self.user_mapping = user_mapping
-        self.product_mapping = product_mapping
-        self.include_features = include_features
-        self.products_df = products_df
-        
-        # Prepare additional features if requested
-        if self.include_features and self.products_df is not None:
-            # Create features for each product
-            self.product_features = {}
-            for _, row in self.products_df.iterrows():
-                product_id = row['partnumber']
-                # Simple features: discount (0/1), family and section
-                features = [
-                    int(row.get('discount', False)),
-                ]
-                # Add family if exists
-                if 'familiy' in row:
-                    features.append(row['familiy'] / 1000)  # Normalize
-                elif 'family' in row:
-                    features.append(row['family'] / 1000)  # Normalize
-                else:
-                    features.append(0)
-                
-                # Add section if exists
-                if 'cod_section' in row:
-                    features.append(row['cod_section'] / 100)  # Normalize
-                else:
-                    features.append(0)
-                
-                self.product_features[product_id] = torch.tensor(features, dtype=torch.float)
-    
-    def __len__(self):
-        return len(self.interactions)
-    
-    def __getitem__(self, idx):
-        user_id = self.interactions.iloc[idx]['user_id']
-        product_id = self.interactions.iloc[idx]['partnumber']
-        label = float(self.interactions.iloc[idx]['add_to_cart'])
-        
-        # Convert to tensor indices
-        user_idx = self.user_mapping.get(user_id, 0)  # 0 for unknown users
-        product_idx = self.product_mapping.get(product_id, 0)  # 0 for unknown products
-        
-        if self.include_features and self.products_df is not None and product_id in self.product_features:
-            prod_features = self.product_features[product_id]
-            return {
-                'user_idx': torch.tensor(user_idx, dtype=torch.long),
-                'product_idx': torch.tensor(product_idx, dtype=torch.long),
-                'product_features': prod_features,
-                'label': torch.tensor(label, dtype=torch.float)
-            }
-        else:
-            return {
-                'user_idx': torch.tensor(user_idx, dtype=torch.long),
-                'product_idx': torch.tensor(product_idx, dtype=torch.long),
-                'label': torch.tensor(label, dtype=torch.float)
-            }
-
-
-class ProductEmbeddingModel(nn.Module):
-    """Neural network model for collaborative filtering with product features"""
-    
-    def __init__(self, num_users, num_products, embedding_dim=64, feature_dim=3, hidden_dims=[128, 64]):
-        super(ProductEmbeddingModel, self).__init__()
-        # Embedding layers
-        self.user_embedding = nn.Embedding(num_users + 1, embedding_dim)  # +1 for unknown user
-        self.product_embedding = nn.Embedding(num_products + 1, embedding_dim)  # +1 for unknown product
-        
-        # Combined input: user embedding + product embedding + product features
-        combined_dim = embedding_dim * 2 + feature_dim
-        
-        # Prediction layers
-        layers = []
-        prev_dim = combined_dim
-        
-        for dim in hidden_dims:
-            layers.append(nn.Linear(prev_dim, dim))
-            layers.append(nn.ReLU())
-            layers.append(nn.BatchNorm1d(dim))
-            layers.append(nn.Dropout(0.2))
-            prev_dim = dim
-        
-        layers.append(nn.Linear(prev_dim, 1))
-        layers.append(nn.Sigmoid())
-        
-        self.fc_layers = nn.Sequential(*layers)
-    
-    def forward(self, user_idx, product_idx, product_features=None):
-        # Get embeddings
-        user_embeds = self.user_embedding(user_idx)
-        product_embeds = self.product_embedding(product_idx)
-        
-        # Concatenate embeddings and features if available
-        if product_features is not None:
-            concat_embeds = torch.cat([user_embeds, product_embeds, product_features], dim=1)
-        else:
-            concat_embeds = torch.cat([user_embeds, product_embeds], dim=1)
-        
-        # Generate prediction
-        output = self.fc_layers(concat_embeds)
-        return output.squeeze()
