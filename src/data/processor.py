@@ -136,6 +136,29 @@ class FeatureProcessor:
         
         return user_features
     
+    def _is_valid_embedding(self, x):
+        """Check if embedding is valid for processing"""
+        if x is None:
+            return False
+        if not isinstance(x, (list, np.ndarray)):
+            return False
+        if len(x) == 0:
+            return False
+        return True
+    
+    def _normalize_embedding(self, x):
+        """Safely normalize an embedding vector"""
+        if not self._is_valid_embedding(x):
+            return None
+        
+        try:
+            norm = np.linalg.norm(x)
+            if norm > 0:
+                return x / norm
+            return x
+        except:
+            return None
+    
     def process_product_features(self, products_df: pd.DataFrame) -> pd.DataFrame:
         """Process product features for content-based recommendations"""
         products_df = products_df.copy()
@@ -154,15 +177,14 @@ class FeatureProcessor:
         if 'discount' not in products_df.columns:
             products_df['discount'] = False
         
-        # Create normalized embeddings
+        # Create normalized embeddings with safe handling of None values
         if 'embedding' in products_df.columns:
-            # Check if embeddings need normalization
-            sample_embedding = products_df.iloc[0]['embedding']
-            if isinstance(sample_embedding, (list, np.ndarray)) and len(sample_embedding) > 0:
-                # Normalize embeddings to unit length
-                products_df['embedding_norm'] = products_df['embedding'].apply(
-                    lambda x: x / np.linalg.norm(x) if np.linalg.norm(x) > 0 else x
-                )
+            # First check if we have any valid embeddings to process
+            valid_embeddings = products_df['embedding'].apply(self._is_valid_embedding).any()
+            
+            if valid_embeddings:
+                # Apply normalization only to valid embeddings
+                products_df['embedding_norm'] = products_df['embedding'].apply(self._normalize_embedding)
         
         return products_df
     
@@ -172,9 +194,7 @@ class FeatureProcessor:
             return {}
         
         # Extract products with valid embeddings
-        valid_products = products_df[products_df['embedding'].apply(
-            lambda x: isinstance(x, (list, np.ndarray)) and len(x) > 0
-        )]
+        valid_products = products_df[products_df['embedding'].apply(self._is_valid_embedding)]
         
         if len(valid_products) < 2:
             return {}
@@ -182,36 +202,48 @@ class FeatureProcessor:
         # Create a dict mapping product IDs to their embeddings
         product_embeddings = {}
         for _, row in valid_products.iterrows():
-            product_embeddings[row['partnumber']] = row['embedding']
+            try:
+                # Additional safety check
+                if self._is_valid_embedding(row['embedding']):
+                    product_embeddings[row['partnumber']] = row['embedding']
+            except:
+                continue
         
-        # Calculate similarity matrix
-        product_ids = list(product_embeddings.keys())
-        embedding_matrix = np.array(list(product_embeddings.values()))
+        if len(product_embeddings) < 2:
+            return {}
         
-        # Normalize embeddings
-        norms = np.linalg.norm(embedding_matrix, axis=1, keepdims=True)
-        norms[norms == 0] = 1  # Avoid division by zero
-        embedding_matrix = embedding_matrix / norms
-        
-        # Calculate cosine similarity
-        similarity_matrix = embedding_matrix @ embedding_matrix.T
-        
-        # Create similarity dictionary
-        similarity_dict = {}
-        max_similar = 50  # Limit to top 50 similar products for each product
-        
-        for i, prod_id in enumerate(product_ids):
-            # Get indices of most similar products (excluding self)
-            similar_indices = np.argsort(-similarity_matrix[i])
-            similar_indices = similar_indices[similar_indices != i][:max_similar]
+        try:
+            # Calculate similarity matrix
+            product_ids = list(product_embeddings.keys())
+            embedding_matrix = np.array(list(product_embeddings.values()))
             
-            # Map back to product IDs with similarity scores
-            similarity_dict[prod_id] = [
-                (product_ids[idx], float(similarity_matrix[i, idx]))
-                for idx in similar_indices
-            ]
-        
-        return similarity_dict
+            # Normalize embeddings
+            norms = np.linalg.norm(embedding_matrix, axis=1, keepdims=True)
+            norms[norms == 0] = 1  # Avoid division by zero
+            embedding_matrix = embedding_matrix / norms
+            
+            # Calculate cosine similarity
+            similarity_matrix = embedding_matrix @ embedding_matrix.T
+            
+            # Create similarity dictionary
+            similarity_dict = {}
+            max_similar = 50  # Limit to top 50 similar products for each product
+            
+            for i, prod_id in enumerate(product_ids):
+                # Get indices of most similar products (excluding self)
+                similar_indices = np.argsort(-similarity_matrix[i])
+                similar_indices = similar_indices[similar_indices != i][:max_similar]
+                
+                # Map back to product IDs with similarity scores
+                similarity_dict[prod_id] = [
+                    (product_ids[idx], float(similarity_matrix[i, idx]))
+                    for idx in similar_indices
+                ]
+            
+            return similarity_dict
+        except Exception as e:
+            print(f"Error calculating product similarities: {str(e)}")
+            return {}
     
     def get_popular_products(self, train_df: pd.DataFrame, 
                              by_country: bool = True, 
