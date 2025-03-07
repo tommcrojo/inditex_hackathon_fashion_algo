@@ -19,11 +19,9 @@ class FeatureProcessor:
         """Extract time-based features from timestamp"""
         df = df.copy()
         
-        # Convert to datetime if not already
-        if not pd.api.types.is_datetime64_any_dtype(df['timestamp_local']):
+        # Use the timestamp column that should already be converted to datetime
+        if 'timestamp' not in df.columns:
             df['timestamp'] = pd.to_datetime(df['timestamp_local'])
-        else:
-            df['timestamp'] = df['timestamp_local']
         
         # Extract time components
         df['hour'] = df['timestamp'].dt.hour
@@ -47,11 +45,9 @@ class FeatureProcessor:
         """Generate session-based features"""
         df = df.copy()
         
-        # Ensure timestamp is datetime
-        if not pd.api.types.is_datetime64_any_dtype(df['timestamp_local']):
+        # Use the timestamp column that should already be converted to datetime
+        if 'timestamp' not in df.columns:
             df['timestamp'] = pd.to_datetime(df['timestamp_local'])
-        else:
-            df['timestamp'] = df['timestamp_local']
         
         # Sort by session and timestamp
         df = df.sort_values(['session_id', 'timestamp'])
@@ -93,11 +89,16 @@ class FeatureProcessor:
     
     def process_user_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Create user profile features"""
-        # Calculate basic RFM metrics from interactions
-        latest_date = pd.to_datetime(df['timestamp_local']).max()
+        # Ensure timestamp is datetime format for faster processing
+        if 'timestamp' not in df.columns:
+            df['timestamp'] = pd.to_datetime(df['timestamp_local'])
         
+        # Calculate basic RFM metrics from interactions
+        latest_date = df['timestamp'].max()
+        
+        # Group by user_id and calculate metrics
         user_rfm = df.groupby('user_id').agg({
-            'timestamp_local': lambda x: (latest_date - pd.to_datetime(x).max()).days,  # Recency (days)
+            'timestamp': lambda x: (latest_date - x.max()).days,  # Recency (days)
             'session_id': 'nunique',  # Frequency (sessions)
             'add_to_cart': 'sum'  # Monetary (cart additions as proxy)
         }).reset_index()
@@ -259,8 +260,15 @@ class FeatureProcessor:
     def prepare_all_features(self, train_df: pd.DataFrame, 
                              products_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         """Process all features and return dictionary of feature dataframes"""
+        # Make a copy to avoid modifying original
+        df_copy = train_df.copy()
+        
+        # Convert timestamp_local to datetime once for efficiency
+        print("Converting timestamps...")
+        df_copy['timestamp'] = pd.to_datetime(df_copy['timestamp_local'])
+        
         print("Processing temporal features...")
-        temporal_df = self.process_temporal_features(train_df)
+        temporal_df = self.process_temporal_features(df_copy)
         
         print("Processing session features...")
         session_df = self.process_session_features(temporal_df)
